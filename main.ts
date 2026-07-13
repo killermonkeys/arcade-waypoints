@@ -3,128 +3,81 @@
  *
  * Mark your track with coloured tiles: exactly one tile of a "start" colour,
  * then one or more tiles of each following checkpoint colour, in the order
- * the track should be driven. This extension finds all of those tiles and
- * chains them together with a nearest-neighbor search (within each colour)
- * to produce an ordered list of waypoints an AI-controlled sprite can drive
- * towards, lap after lap.
+ * the track should be driven. This extension finds all of those tiles on a
+ * tilemap and chains them together with a nearest-neighbor search (within
+ * each colour) to produce an ordered list of waypoints an AI-controlled
+ * sprite can drive towards, lap after lap.
  */
 //% color="#B36521" icon="\uf1b9" block="Waypoints"
 namespace waypoints {
     /**
-     * An ordered set of waypoints that make up one lap of a race track.
-     */
-    export class Track {
-        public waypoints: tiles.Location[];
-
-        constructor(waypoints: tiles.Location[]) {
-            this.waypoints = waypoints;
-        }
-
-        /**
-         * The number of waypoints in this track.
-         */
-        count(): number {
-            return this.waypoints.length;
-        }
-
-        /**
-         * The waypoint at the given index, wrapping around to the start of
-         * the track once the index runs past the end. This makes it safe to
-         * keep incrementing an index across multiple laps.
-         * @param index the waypoint index, can be any integer (including negative or beyond the track length)
-         */
-        waypointAt(index: number): tiles.Location {
-            if (this.waypoints.length === 0) return undefined;
-            const wrapped = ((index % this.waypoints.length) + this.waypoints.length) % this.waypoints.length;
-            return this.waypoints[wrapped];
-        }
-    }
-
-    /**
-     * Scan the current tilemap for the given sequence of marker tile
-     * colours and return them as an ordered waypoint track.
+     * Scan a tilemap for the given sequence of marker tile colours and
+     * return them as an ordered list of waypoints.
      *
-     * The first colour must mark exactly one tile - the start/finish line.
-     * Every colour after that can mark one or more tiles; each colour's
-     * tiles are chained together with a nearest-neighbor search starting
-     * from the last waypoint found so far, so the track only ever moves
-     * forward through the sequence of colours.
+     * The first colour must mark exactly one tile - the start/finish line
+     * (the game will fail with an error if more than one is found). Every
+     * colour after that can mark one or more tiles: starting from the last
+     * waypoint found so far, each colour's tiles are repeatedly chained on
+     * by picking whichever one of that colour is nearest, until none of
+     * that colour are left. This means the result only ever moves forward
+     * through the sequence of colours you provide.
+     * @param tilemap the tilemap to search for marker tiles
      * @param tileColours the marker tile colours, in track order (start colour first)
      */
     //% blockId=waypoints_build_track
-    //% block="build waypoint track from tiles $tileColours"
+    //% block="waypoints on tilemap $tilemap with tile colours $tileColours"
+    //% tilemap.shadow=tiles_tilemap_editor
+    //% tileColours.shadow="lists_create_with"
+    //% tileColours.defl="tileset_tile_picker"
+    //% blockSetVariable=waypointList
     //% weight=100 blockGap=8
-    //% group="Track"
-    export function buildTrack(tileColours: Image[]): Track {
-        return new Track(orderWaypoints(tileColours));
+    export function buildTrack(tilemap: tiles.TileMapData, tileColours: Image[]): tiles.Location[] {
+        return orderWaypoints(tilemap, tileColours);
     }
 
     /**
-     * Get the waypoint at the given index of a track, wrapping around to
-     * the start once the index runs past the end of the track. Useful for
-     * driving multiple laps: keep incrementing the index every time a
-     * sprite reaches its current waypoint.
-     * @param track the waypoint track
-     * @param index the waypoint index
+     * Get the waypoint at the given index of a waypoint list, wrapping
+     * around to the start once the index runs past the end of the list.
+     * This makes it safe to keep incrementing an index every time a racer
+     * reaches its current target, across as many laps as you like.
+     * @param waypointList the ordered list of waypoints, from waypoints.buildTrack
+     * @param index the waypoint index, can be any integer
      */
     //% blockId=waypoints_waypoint_at
-    //% block="waypoint at index $index of $track"
+    //% block="waypoint at index $index of $waypointList"
     //% weight=90 blockGap=8
-    //% group="Track"
-    export function waypointAt(track: Track, index: number): tiles.Location {
-        return track ? track.waypointAt(index) : undefined;
+    export function waypointAt(waypointList: tiles.Location[], index: number): tiles.Location {
+        if (!waypointList || waypointList.length === 0) return undefined;
+        const wrapped = ((index % waypointList.length) + waypointList.length) % waypointList.length;
+        return waypointList[wrapped];
     }
 
-    /**
-     * Get the number of waypoints in a track.
-     * @param track the waypoint track
-     */
-    //% blockId=waypoints_count
-    //% block="number of waypoints in $track"
-    //% weight=80
-    //% group="Track"
-    export function count(track: Track): number {
-        return track ? track.count() : 0;
-    }
-
-    /**
-     * Get the ordered waypoints of a track as a plain array, for use with
-     * "for each" loops.
-     * @param track the waypoint track
-     */
-    //% blockId=waypoints_to_array
-    //% block="array of waypoints in $track"
-    //% weight=70
-    //% group="Track"
-    export function toArray(track: Track): tiles.Location[] {
-        return track ? track.waypoints : [];
-    }
-
-    function orderWaypoints(tileColours: Image[]): tiles.Location[] {
+    function orderWaypoints(tilemap: tiles.TileMapData, tileColours: Image[]): tiles.Location[] {
         const result: tiles.Location[] = [];
-        if (!tileColours || tileColours.length === 0) return result;
+        if (!tilemap || !tileColours || tileColours.length === 0) return result;
 
-        const startTiles = tiles.getTilesByType(tileColours[0]);
+        const startTiles = tilesOfType(tilemap, tileColours[0]);
         if (startTiles.length === 0) {
-            console.log("waypoints: no start tile found for the first colour");
+            console.log("waypoints: no start tile found for the first tile colour");
             return result;
         }
         if (startTiles.length > 1) {
-            console.log("waypoints: expected exactly one start tile, found " + startTiles.length + " - using the first one");
+            control.fail("waypoints: expected exactly one start tile, found " + startTiles.length);
+            return result;
         }
 
         let current = startTiles[0];
         result.push(current);
 
         for (let colourIndex = 1; colourIndex < tileColours.length; colourIndex++) {
-            const remaining = tiles.getTilesByType(tileColours[colourIndex]);
+            const remaining = tilesOfType(tilemap, tileColours[colourIndex]);
 
             while (remaining.length > 0) {
                 let nearestIndex = 0;
-                let nearestDistance = distanceSquared(current, remaining[0]);
+                let nearestDistance = gridDistanceSquared(current, remaining[0]);
 
                 for (let j = 1; j < remaining.length; j++) {
-                    const d = distanceSquared(current, remaining[j]);
+                    const d = gridDistanceSquared(current, remaining[j]);
                     if (d < nearestDistance) {
                         nearestDistance = d;
                         nearestIndex = j;
@@ -140,9 +93,21 @@ namespace waypoints {
         return result;
     }
 
-    function distanceSquared(a: tiles.Location, b: tiles.Location): number {
-        const dx = a.x - b.x;
-        const dy = a.y - b.y;
-        return dx * dx + dy * dy;
+    function tilesOfType(tilemap: tiles.TileMapData, tile: Image): tiles.Location[] {
+        if (!tilemap || !tile) return [];
+        const index = tilemap.getImageType(tile);
+        return tilemap.getTilesByType(index);
+    }
+
+    // Uses column/row (grid coordinates) rather than x/y (pixel coordinates)
+    // because a Location's x/y getters read the scale of whichever tilemap
+    // is currently active in the scene - which may not be the tilemap
+    // passed in here. Column/row are stable regardless of which tilemap is
+    // active, and scale equally in both axes, so nearest-neighbor ordering
+    // comes out identical either way.
+    function gridDistanceSquared(a: tiles.Location, b: tiles.Location): number {
+        const dCol = a.column - b.column;
+        const dRow = a.row - b.row;
+        return dCol * dCol + dRow * dRow;
     }
 }
