@@ -1,0 +1,19 @@
+{
+    "name": "arcade-waypoints",
+    "version": "0.0.1",
+    "description": "Order colour-coded tilemap markers into a race track waypoint list, using nearest-neighbor chaining, for driving AI-controlled racers.",
+    "dependencies": {
+        "device": "*"
+    },
+    "files": [
+        "main.ts",
+        "README.md"
+    ],
+    "testFiles": [
+        "test.ts"
+    ],
+    "supportedTargets": [
+        "arcade"
+    ],
+    "preferredEditor": "tsprj"
+}
