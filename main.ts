@@ -1,3 +1,48 @@
+tiles.setCurrentTilemap(tilemap`map`);
+let trackWaypoints: tiles.Location[] = null;
+let starttile = assets.tile`roadTurn1`;
+trackWaypoints = waypoints.buildTrack(tilemap`map`, [
+    assets.tile`roadTurn1`, 
+    assets.tile`roadTurn2`,
+    assets.tile`roadTurn3`,
+    assets.tile`roadTurn4`]);
+let isMatch = tiles.getTileAt(1, 7);
+console.log(assets.tile`roadTurn1`.equals(isMatch));
+
+let numberTiles = [
+    assets.tile`number00`,
+    assets.tile`number01`,
+    assets.tile`number02`,
+    assets.tile`number03`,
+    assets.tile`number04`,
+    assets.tile`number05`,
+    assets.tile`number06`,
+    assets.tile`number07`,
+    assets.tile`number08`,
+    assets.tile`number09`,
+    assets.tile`number10`,
+    assets.tile`number11`,
+    assets.tile`number12`
+];
+for (let i=0; i<trackWaypoints.length; i++) {
+    // Ensure we don't go out of bounds of our array
+    let tileToSet = numberTiles[i % numberTiles.length];
+
+    // Set the tile at the location coordinates
+    tiles.setTileAt(trackWaypoints[i], tileToSet);
+}
+
+let debugData = trackWaypoints.map(loc => {
+    return {
+        x: loc.col, // tiles.Location uses 'col' and 'row'
+        y: loc.row,
+        tileKind: loc.getImage() // If you need to see what the tile is
+    };
+});
+console.log(JSON.stringify(debugData));
+let mySprite = sprites.create(assets.image`carRedRight`, SpriteKind.Player);
+controller.moveSprite(mySprite);
+scene.cameraFollowSprite(mySprite)
 /**
  * Order colour-coded tilemap markers into a race track waypoint list.
  *
@@ -53,13 +98,15 @@ namespace waypoints {
     }
 
     function orderWaypoints(tilemap: tiles.TileMapData, tileColours: Image[]): tiles.Location[] {
-        const result: tiles.Location[] = [];
+        let result: tiles.Location[] = [];
         if (!tilemap || !tileColours || tileColours.length === 0) return result;
 
-        const startTiles = tilesOfType(tilemap, tileColours[0]);
+        const startTiles = getTilesOfTypeForMap(tilemap, tileColours[0]);
         if (startTiles.length === 0) {
             console.log("waypoints: no start tile found for the first tile colour");
             return result;
+        } else {
+            console.log("found start tiles: " + JSON.stringify(startTiles));
         }
         if (startTiles.length > 1) {
             control.fail("waypoints: expected exactly one start tile, found " + startTiles.length);
@@ -70,7 +117,7 @@ namespace waypoints {
         result.push(current);
 
         for (let colourIndex = 1; colourIndex < tileColours.length; colourIndex++) {
-            const remaining = tilesOfType(tilemap, tileColours[colourIndex]);
+            const remaining = getTilesOfTypeForMap(tilemap, tileColours[colourIndex]);
 
             while (remaining.length > 0) {
                 let nearestIndex = 0;
@@ -93,10 +140,25 @@ namespace waypoints {
         return result;
     }
 
-    function tilesOfType(tilemap: tiles.TileMapData, tile: Image): tiles.Location[] {
-        if (!tilemap || !tile) return [];
-        const index = tilemap.getImageType(tile);
-        return tilemap.getTilesByType(index);
+    /**
+     * Find tiles of a type for a specific tile map, similar to tiles.getTilesOfType but for any map
+     */
+    function getTilesOfTypeForMap(tilemap: tiles.TileMapData, tile: Image): tiles.Location[] {
+        if (!tilemap || !tile) {
+            console.log("error, no tilemap or tile");
+            return [];
+        }
+        let locations: tiles.Location[] = [];
+        for (let i=0; i < tilemap.width; i++) {
+            for (let j=0; j < tilemap.height; j++) {
+                if (tilemap.getTileImage(tilemap.getTile(i,j)).equals(tile)) {
+                    console.log("found match at x:" + i + ", y:" + j);
+                    let loc = new tiles.Location(i, j, null)
+                    locations.push(loc);
+                }
+            }
+        }
+        return locations;
     }
 
     // Uses column/row (grid coordinates) rather than x/y (pixel coordinates)

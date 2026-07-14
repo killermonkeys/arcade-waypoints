@@ -7,11 +7,19 @@
     },
     "files": [
         "main.ts",
-        "README.md"
+        "README.md",
+        "tilemap.g.jres",
+        "tilemap.g.ts",
+        "images.g.jres",
+        "images.g.ts"
     ],
     "testFiles": [
         "test.ts"
     ],
+    "targetVersions": {
+        "target": "4.0.14",
+        "targetId": "arcade"
+    },
     "supportedTargets": [
         "arcade"
     ],
