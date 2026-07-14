@@ -1,9 +1,4 @@
 {
-    "image1": {
-        "data": "hwQQABAAAAAAAAAAAAAAAAAAIiLu7g4AACDM4u7u/wAAwiy+4u7/DyBE5Lvi7v8PICLku+Lu/w8gIuTu7u7+ACAi5Lvy/+4AICLku+L+7gAgIuS74v7+ACAi4r7i7/8PIMy87vLu/w8Awswr7u7/DwAgRCQi7v4PAAAiItLi7gAAAC0i0u0OAA==",
-        "mimeType": "image/x-mkcd-f4",
-        "displayName": "carRedRight"
-    },
     "*": {
         "mimeType": "image/x-mkcd-f4",
         "dataEncoding": "base64",
