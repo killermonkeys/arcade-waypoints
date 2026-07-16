@@ -1,24 +1,19 @@
 /**
- * Order colour-coded tilemap markers into a race track waypoint list, and
- * help drive AI-controlled sprites around it.
+ * Colour-coded tilemap waypoints for AI-driven vehicles.
  *
  * Mark your track with coloured tiles: exactly one tile of a "start" colour,
  * then one or more tiles of each following checkpoint colour, in the order
- * the track should be driven. This extension finds all of those tiles on a
- * tilemap and chains them together with a nearest-neighbor search (within
- * each colour) to produce an ordered list of waypoints. A sprite can then be
- * registered to follow that list - the extension tracks which waypoint it's
- * currently headed towards (advancing and looping automatically as the
- * sprite gets close) - while plan_turn/plan_accel tell you which way to
- * steer and whether to accelerate or brake, so you can drive it with the
- * same controls/physics as the player.
+ * the track should be driven. buildTrack finds those tiles and chains them
+ * with nearest-neighbor ordering. Register a vehicles.Vehicle to follow the
+ * list; planTurn / planAccel produce the same -1/0/+1 signals that
+ * vehicles.drive expects, using the vehicle's angle as its heading.
  */
-//% color="#B36521" icon="\uf1b9" block="Waypoints"
+//% color="#B36521" icon="\uf018" block="Waypoints"
 //% groups=['Track', 'Driving', 'Events', 'Debug']
 namespace waypoints {
     /**
-     * An ordered list of race track waypoints, plus the per-sprite progress
-     * needed to drive one or more sprites around it. Create one with
+     * An ordered list of race track waypoints, plus the per-vehicle progress
+     * needed to drive one or more vehicles around it. Create one with
      * waypoints.buildTrack.
      */
     export class WaypointList {
@@ -40,28 +35,19 @@ namespace waypoints {
     }
 
     class Follower {
-        sprite: Sprite;
+        vehicle: vehicles.Vehicle;
         currentIndex: number;
         thresholdDistance: number;
-        // The sprite's last non-zero movement heading (radians), remembered
-        // so headingDifference still has something sensible to steer by
-        // once the sprite comes to a stop and vx/vy both drop to 0 - at
-        // which point atan2(0, 0) would otherwise always come out as 0
-        // (facing right) regardless of which way the sprite actually last
-        // faced. Defaults to 0, same as a freshly-tracked sprite's rotation
-        // in the "Sprite FX" extension.
-        lastHeading: number;
 
-        constructor(sprite: Sprite, currentIndex: number, thresholdDistance: number) {
-            this.sprite = sprite;
+        constructor(vehicle: vehicles.Vehicle, currentIndex: number, thresholdDistance: number) {
+            this.vehicle = vehicle;
             this.currentIndex = currentIndex;
             this.thresholdDistance = thresholdDistance;
-            this.lastHeading = 0;
         }
     }
 
     class DebugConfig {
-        sprite: Sprite;
+        vehicle: vehicles.Vehicle;
         prevTile: Image;
         curTile: Image;
         nextTile: Image;
@@ -73,8 +59,8 @@ namespace waypoints {
         // that's currently active in the scene.
         originalImages: Image[];
 
-        constructor(sprite: Sprite, prevTile: Image, curTile: Image, nextTile: Image) {
-            this.sprite = sprite;
+        constructor(vehicle: vehicles.Vehicle, prevTile: Image, curTile: Image, nextTile: Image) {
+            this.vehicle = vehicle;
             this.prevTile = prevTile;
             this.curTile = curTile;
             this.nextTile = nextTile;
@@ -187,109 +173,110 @@ namespace waypoints {
     }
 
     /**
-     * Register a sprite to follow a waypoint list. The nearest waypoint to
-     * the sprite right now becomes its current target; once the sprite gets
-     * within the threshold distance of it, the target automatically
+     * Register a vehicle to follow a waypoint list. The nearest waypoint to
+     * the vehicle right now becomes its current target; once the vehicle
+     * gets within the threshold distance of it, the target automatically
      * advances to the next waypoint (looping back to the start once the end
      * of the list is reached).
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param sprite the sprite that should follow the list
-     * @param thresholdDistance how close (in pixels) the sprite must get before advancing to the next waypoint
+     * @param vehicle the vehicle that should follow the list
+     * @param thresholdDistance how close (in pixels) the vehicle must get before advancing to the next waypoint
      */
     //% blockId=waypoints_follow
-    //% block="make $sprite follow $list with threshold $thresholdDistance px"
-    //% sprite.shadow=variables_get
-    //% sprite.defl=mySprite
+    //% block="make $vehicle follow $list with threshold $thresholdDistance px"
+    //% vehicle.shadow=variables_get
+    //% vehicle.defl=myVehicle
     //% thresholdDistance.defl=8
     //% group="Driving" weight=80 blockGap=8
-    export function follow(list: WaypointList, sprite: Sprite, thresholdDistance: number): void {
-        if (!list || !sprite || !list.locations || list.locations.length === 0) return;
+    export function follow(list: WaypointList, vehicle: vehicles.Vehicle, thresholdDistance: number): void {
+        if (!list || !vehicle || !vehicle.sprite || !list.locations || list.locations.length === 0) return;
 
-        const existing = findFollower(list, sprite);
+        const existing = findFollower(list, vehicle);
         if (existing) {
             existing.thresholdDistance = thresholdDistance;
         } else {
-            const nearestIndex = nearestWaypointIndex(list, sprite);
-            list.followers.push(new Follower(sprite, nearestIndex, thresholdDistance));
+            const nearestIndex = nearestWaypointIndex(list, vehicle.sprite);
+            list.followers.push(new Follower(vehicle, nearestIndex, thresholdDistance));
         }
 
         ensureTicker(list);
     }
 
     /**
-     * Get the waypoint a sprite is currently headed towards, or undefined
-     * if the sprite isn't following this waypoint list.
+     * Get the waypoint a vehicle is currently headed towards, or undefined
+     * if the vehicle isn't following this waypoint list.
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param sprite the sprite
+     * @param vehicle the vehicle
      */
     //% blockId=waypoints_current_waypoint
-    //% block="current waypoint of $sprite following $list"
-    //% sprite.shadow=variables_get
-    //% sprite.defl=mySprite
+    //% block="current waypoint of $vehicle following $list"
+    //% vehicle.shadow=variables_get
+    //% vehicle.defl=myVehicle
     //% group="Driving" weight=75 blockGap=8
-    export function currentWaypoint(list: WaypointList, sprite: Sprite): tiles.Location {
-        if (!list || !sprite) return undefined;
-        const follower = findFollower(list, sprite);
+    export function currentWaypoint(list: WaypointList, vehicle: vehicles.Vehicle): tiles.Location {
+        if (!list || !vehicle) return undefined;
+        const follower = findFollower(list, vehicle);
         if (!follower) return undefined;
         return list.locations[follower.currentIndex];
     }
 
     /**
-     * Plan whether a sprite following a waypoint list should turn left or
-     * right to face its current waypoint. Returns 0 if the sprite is
+     * Plan whether a vehicle following a waypoint list should turn left or
+     * right to face its current waypoint. Returns 0 if the vehicle is
      * already facing close enough to the waypoint (within the threshold),
-     * -1 to turn left, or +1 to turn right.
+     * -1 to turn left, or +1 to turn right. Feed the result into
+     * vehicles.drive.
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param sprite the sprite, which must already be following the list (see waypoints.follow)
-     * @param thresholdRadians how far off (in radians) the sprite's heading can be before it needs to turn
+     * @param vehicle the vehicle, which must already be following the list (see waypoints.follow)
+     * @param thresholdRadians how far off (in radians) the vehicle's angle can be before it needs to turn
      */
     //% blockId=waypoints_plan_turn
-    //% block="plan turn for $sprite following $list with threshold $thresholdRadians"
-    //% sprite.shadow=variables_get
-    //% sprite.defl=mySprite
+    //% block="plan turn for $vehicle following $list with threshold $thresholdRadians"
+    //% vehicle.shadow=variables_get
+    //% vehicle.defl=myVehicle
     //% thresholdRadians.defl=0.2
     //% group="Driving" weight=70 blockGap=8
-    export function planTurn(list: WaypointList, sprite: Sprite, thresholdRadians: number): number {
-        if (!list || !sprite || !findFollower(list, sprite)) {
-            console.log("waypoints: sprite is not following this waypoint list");
+    export function planTurn(list: WaypointList, vehicle: vehicles.Vehicle, thresholdRadians: number): number {
+        if (!list || !vehicle || !findFollower(list, vehicle)) {
+            console.log("waypoints: vehicle is not following this waypoint list");
             return 0;
         }
 
-        const diff = headingDifference(list, sprite);
+        const diff = headingDifference(list, vehicle);
         if (Math.abs(diff) <= thresholdRadians) return 0;
         return diff > 0 ? 1 : -1;
     }
 
     /**
-     * Plan whether a sprite following a waypoint list should accelerate or
-     * brake. Returns +1 to accelerate, unless the sprite's heading is off
+     * Plan whether a vehicle following a waypoint list should accelerate or
+     * brake. Returns +1 to accelerate, unless the vehicle's angle is off
      * from its current waypoint by more than the threshold, in which case
-     * it returns -1 to brake.
+     * it returns -1 to brake. Feed the result into vehicles.drive.
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param sprite the sprite, which must already be following the list (see waypoints.follow)
-     * @param thresholdRadians how far off (in radians) the sprite's heading can be before it should brake instead of accelerating
+     * @param vehicle the vehicle, which must already be following the list (see waypoints.follow)
+     * @param thresholdRadians how far off (in radians) the vehicle's angle can be before it should brake instead of accelerating
      */
     //% blockId=waypoints_plan_accel
-    //% block="plan accel for $sprite following $list with threshold $thresholdRadians"
-    //% sprite.shadow=variables_get
-    //% sprite.defl=mySprite
+    //% block="plan accel for $vehicle following $list with threshold $thresholdRadians"
+    //% vehicle.shadow=variables_get
+    //% vehicle.defl=myVehicle
     //% thresholdRadians.defl=0.6
     //% group="Driving" weight=65 blockGap=8
-    export function planAccel(list: WaypointList, sprite: Sprite, thresholdRadians: number): number {
-        if (!list || !sprite || !findFollower(list, sprite)) {
-            console.log("waypoints: sprite is not following this waypoint list");
+    export function planAccel(list: WaypointList, vehicle: vehicles.Vehicle, thresholdRadians: number): number {
+        if (!list || !vehicle || !findFollower(list, vehicle)) {
+            console.log("waypoints: vehicle is not following this waypoint list");
             return 0;
         }
 
-        const diff = headingDifference(list, sprite);
+        const diff = headingDifference(list, vehicle);
         return Math.abs(diff) > thresholdRadians ? -1 : 1;
     }
 
     /**
-     * Run some code whenever a sprite following this waypoint list reaches
+     * Run some code whenever a vehicle following this waypoint list reaches
      * its current waypoint and advances to the next one.
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param handler code to run, given the sprite and its new waypoint index
+     * @param handler code to run, given the vehicle's sprite and its new waypoint index
      */
     //% blockId=waypoints_on_waypoint_reached
     //% block="on waypoint reached of $list"
@@ -302,33 +289,33 @@ namespace waypoints {
 
     /**
      * For debugging: highlight the previous, current, and next waypoint for
-     * a sprite by changing their tiles on the currently active tilemap. The
-     * highlighted tiles move along automatically as the sprite advances,
+     * a vehicle by changing their tiles on the currently active tilemap. The
+     * highlighted tiles move along automatically as the vehicle advances,
      * and any tile that's no longer prev/current/next is restored to
      * whatever tile was actually there before it got highlighted (not the
      * waypoints.buildTrack marker tile - this works correctly even if you
      * built the waypoint list from a separate, hidden tilemap). Leave any
      * of the three images empty to skip that role.
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param sprite the sprite to show debug waypoints for, which must already be following the list (see waypoints.follow)
+     * @param vehicle the vehicle to show debug waypoints for, which must already be following the list (see waypoints.follow)
      * @param prevTile tile image for the previous waypoint
      * @param curTile tile image for the current waypoint
      * @param nextTile tile image for the next waypoint
      */
     //% blockId=waypoints_debug_show
-    //% block="show prev $prevTile current $curTile next $nextTile waypoints on $list for $sprite"
-    //% sprite.shadow=variables_get
-    //% sprite.defl=mySprite
+    //% block="show prev $prevTile current $curTile next $nextTile waypoints on $list for $vehicle"
+    //% vehicle.shadow=variables_get
+    //% vehicle.defl=myVehicle
     //% prevTile.shadow=tileset_tile_picker
     //% curTile.shadow=tileset_tile_picker
     //% nextTile.shadow=tileset_tile_picker
     //% group="Debug" weight=50 blockGap=8
-    export function debugShowWaypoints(list: WaypointList, sprite: Sprite, prevTile: Image, curTile: Image, nextTile: Image): void {
-        if (!list || !sprite) return;
+    export function debugShowWaypoints(list: WaypointList, vehicle: vehicles.Vehicle, prevTile: Image, curTile: Image, nextTile: Image): void {
+        if (!list || !vehicle) return;
 
-        let config = findDebugConfig(list, sprite);
+        let config = findDebugConfig(list, vehicle);
         if (!config) {
-            config = new DebugConfig(sprite, prevTile, curTile, nextTile);
+            config = new DebugConfig(vehicle, prevTile, curTile, nextTile);
             list.debugConfigs.push(config);
         } else {
             config.prevTile = prevTile;
@@ -340,20 +327,20 @@ namespace waypoints {
     }
 
     /**
-     * Stop debug-highlighting waypoints for a sprite, and restore any
+     * Stop debug-highlighting waypoints for a vehicle, and restore any
      * highlighted tiles back to whatever was there before.
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param sprite the sprite to stop showing debug waypoints for
+     * @param vehicle the vehicle to stop showing debug waypoints for
      */
     //% blockId=waypoints_debug_hide
-    //% block="hide debug waypoints on $list for $sprite"
-    //% sprite.shadow=variables_get
-    //% sprite.defl=mySprite
+    //% block="hide debug waypoints on $list for $vehicle"
+    //% vehicle.shadow=variables_get
+    //% vehicle.defl=myVehicle
     //% group="Debug" weight=45 blockGap=8
-    export function debugHideWaypoints(list: WaypointList, sprite: Sprite): void {
-        if (!list || !sprite) return;
+    export function debugHideWaypoints(list: WaypointList, vehicle: vehicles.Vehicle): void {
+        if (!list || !vehicle) return;
 
-        const config = findDebugConfig(list, sprite);
+        const config = findDebugConfig(list, vehicle);
         if (!config) return;
 
         for (let i = 0; i < config.paintedIndices.length; i++) {
@@ -361,7 +348,7 @@ namespace waypoints {
         }
 
         list.debugConfigs = list.debugConfigs.filter(function (c) {
-            return c.sprite.id !== sprite.id;
+            return c.vehicle.sprite.id !== vehicle.sprite.id;
         });
     }
 
@@ -438,16 +425,16 @@ namespace waypoints {
         return dCol * dCol + dRow * dRow;
     }
 
-    function findFollower(list: WaypointList, sprite: Sprite): Follower {
+    function findFollower(list: WaypointList, vehicle: vehicles.Vehicle): Follower {
         for (let i = 0; i < list.followers.length; i++) {
-            if (list.followers[i].sprite.id === sprite.id) return list.followers[i];
+            if (list.followers[i].vehicle.sprite.id === vehicle.sprite.id) return list.followers[i];
         }
         return undefined;
     }
 
-    function findDebugConfig(list: WaypointList, sprite: Sprite): DebugConfig {
+    function findDebugConfig(list: WaypointList, vehicle: vehicles.Vehicle): DebugConfig {
         for (let i = 0; i < list.debugConfigs.length; i++) {
-            if (list.debugConfigs[i].sprite.id === sprite.id) return list.debugConfigs[i];
+            if (list.debugConfigs[i].vehicle.sprite.id === vehicle.sprite.id) return list.debugConfigs[i];
         }
         return undefined;
     }
@@ -481,22 +468,23 @@ namespace waypoints {
 
         for (let i = 0; i < list.followers.length; i++) {
             const follower = list.followers[i];
-            if (!follower.sprite || (follower.sprite.flags & sprites.Flag.Destroyed)) {
+            const sprite = follower.vehicle.sprite;
+            if (!sprite || (sprite.flags & sprites.Flag.Destroyed)) {
                 cleanupNeeded = true;
                 continue;
             }
 
             const target = list.locations[follower.currentIndex];
-            if (distanceTo(follower.sprite, target) <= follower.thresholdDistance) {
+            if (distanceTo(sprite, target) <= follower.thresholdDistance) {
                 follower.currentIndex = (follower.currentIndex + 1) % list.locations.length;
-                fireWaypointReached(list, follower.sprite, follower.currentIndex);
-                updateDebugForSprite(list, follower.sprite);
+                fireWaypointReached(list, sprite, follower.currentIndex);
+                updateDebugForVehicle(list, follower.vehicle);
             }
         }
 
         if (cleanupNeeded) {
             list.followers = list.followers.filter(function (f) {
-                return f.sprite && !(f.sprite.flags & sprites.Flag.Destroyed);
+                return f.vehicle.sprite && !(f.vehicle.sprite.flags & sprites.Flag.Destroyed);
             });
         }
     }
@@ -507,13 +495,13 @@ namespace waypoints {
         }
     }
 
-    function updateDebugForSprite(list: WaypointList, sprite: Sprite): void {
-        const config = findDebugConfig(list, sprite);
+    function updateDebugForVehicle(list: WaypointList, vehicle: vehicles.Vehicle): void {
+        const config = findDebugConfig(list, vehicle);
         if (config) paintDebug(list, config);
     }
 
     function paintDebug(list: WaypointList, config: DebugConfig): void {
-        const follower = findFollower(list, config.sprite);
+        const follower = findFollower(list, config.vehicle);
         if (!follower || list.locations.length === 0) return;
 
         const count = list.locations.length;
@@ -579,25 +567,12 @@ namespace waypoints {
         return a;
     }
 
-    // Sprites have no built-in "facing angle" while stationary - only a
-    // velocity, which goes to (0, 0) whenever the sprite isn't moving. So
-    // while it's moving, take the heading straight from velocity (and
-    // remember it); once it stops, keep reporting that remembered heading
-    // instead of letting atan2(0, 0) collapse it to 0.
-    function spriteHeading(sprite: Sprite, follower: Follower): number {
-        if (sprite.vx !== 0 || sprite.vy !== 0) {
-            follower.lastHeading = Math.atan2(sprite.vy, sprite.vx);
-        }
-        return follower.lastHeading;
-    }
-
-    function headingDifference(list: WaypointList, sprite: Sprite): number {
-        const follower = findFollower(list, sprite);
+    function headingDifference(list: WaypointList, vehicle: vehicles.Vehicle): number {
+        const follower = findFollower(list, vehicle);
         if (!follower) return 0;
 
         const target = list.locations[follower.currentIndex];
-        const heading = spriteHeading(sprite, follower);
-        const toTarget = angleTo(sprite, target);
-        return normalizeAngle(toTarget - heading);
+        const toTarget = angleTo(vehicle.sprite, target);
+        return normalizeAngle(toTarget - vehicle.angle);
     }
 }

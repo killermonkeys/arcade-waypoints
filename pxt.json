@@ -1,13 +1,14 @@
 {
-    "name": "arcade-waypoints",
-    "version": "0.2.2",
-    "description": "Order colour-coded tilemap markers into a race track waypoint list, using nearest-neighbor chaining, for driving AI-controlled racers.",
+    "name": "arcade-vehicles",
+    "version": "0.3.0",
+    "description": "Top-down vehicle physics (angle, speed, grip, tile surfaces) plus colour-coded waypoint tracks for AI drivers in MakeCode Arcade.",
     "dependencies": {
         "device": "*"
     },
     "files": [
         "main.ts",
         "README.md",
+        "vehicles.ts",
         "api.ts"
     ],
     "testFiles": [
