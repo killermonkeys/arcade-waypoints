@@ -35,10 +35,23 @@ namespace vehicles {
 
     const DEFAULT_SURFACE = new SurfaceProps(1, 1, 0);
     const surfaceRegistry: SurfaceEntry[] = [];
+    // Vehicles keyed by the wrapped sprite so createFromSprite is idempotent
+    // and overlap handlers can recover the Vehicle from a Sprite.
+    const vehicleRegistry: Vehicle[] = [];
+    // How far sprite vx/vy may drift from speed/angle before we treat the
+    // sprite as authoritative (wall bounces, setVelocity, etc.).
+    const VELOCITY_SYNC_EPS = 0.5;
 
     /**
      * A top-down vehicle: a Sprite plus angle/speed/powers/grip used by
-     * vehicles.drive. Create one with vehicles.create.
+     * vehicles.drive. Create one with vehicles.create or
+     * vehicles.createFromSprite.
+     *
+     * Position (x/y) and collisions live only on the sprite - changing
+     * them with ordinary sprite ops (setPosition, x = …, etc.) is fine
+     * and stays in sync automatically. Speed and angle are vehicle-owned;
+     * drive writes them back to sprite vx/vy each step, and will re-read
+     * vx/vy first if something else changed the sprite's velocity.
      */
     export class Vehicle {
         sprite: Sprite;
@@ -83,14 +96,62 @@ namespace vehicles {
     //% blockSetVariable=myVehicle
     //% group="Vehicle" weight=100 blockGap=8
     export function create(img: Image, kind: number): Vehicle {
-        const sprite = sprites.create(img, kind);
-        const vehicle = new Vehicle(sprite, img.clone());
+        return createFromSprite(sprites.create(img, kind));
+    }
+
+    /**
+     * Wrap an existing sprite as a vehicle (same sprite instance - position,
+     * overlaps, camera follow, etc. keep working on it). Calling again on
+     * the same sprite returns the existing vehicle.
+     *
+     * The sprite's current image is treated as the unrotated (angle 0,
+     * facing right) art. If the sprite is already moving, speed and angle
+     * are seeded from its velocity.
+     * @param sprite the sprite to drive as a vehicle
+     */
+    //% blockId=vehicles_create_from_sprite
+    //% block="create vehicle from $sprite"
+    //% sprite.shadow=variables_get
+    //% sprite.defl=mySprite
+    //% blockSetVariable=myVehicle
+    //% group="Vehicle" weight=99 blockGap=8
+    export function createFromSprite(sprite: Sprite): Vehicle {
+        if (!sprite) return undefined;
+
+        const existing = vehicleOf(sprite);
+        if (existing) return existing;
+
+        const vehicle = new Vehicle(sprite, sprite.image.clone());
+        seedKinematicsFromSprite(vehicle);
+        vehicleRegistry.push(vehicle);
         applyFacing(vehicle);
+        applyVelocity(vehicle);
         return vehicle;
     }
 
     /**
+     * The vehicle wrapping this sprite, or undefined if it isn't one.
+     * Handy from overlap / destruction handlers that only receive a Sprite.
+     */
+    //% blockId=vehicles_of_sprite
+    //% block="vehicle of $sprite"
+    //% sprite.shadow=variables_get
+    //% sprite.defl=mySprite
+    //% group="Vehicle" weight=96 blockGap=8
+    export function vehicleOf(sprite: Sprite): Vehicle {
+        if (!sprite) return undefined;
+        pruneDestroyedVehicles();
+        for (let i = 0; i < vehicleRegistry.length; i++) {
+            if (vehicleRegistry[i].sprite && vehicleRegistry[i].sprite.id === sprite.id) {
+                return vehicleRegistry[i];
+            }
+        }
+        return undefined;
+    }
+
+    /**
      * The underlying sprite of a vehicle (for camera follow, overlaps, etc.).
+     * Same object you passed to createFromSprite, or that create made.
      */
     //% blockId=vehicles_sprite
     //% block="sprite of $vehicle"
@@ -243,6 +304,10 @@ namespace vehicles {
     export function drive(vehicle: Vehicle, turn: number, accel: number): void {
         if (!vehicle || !vehicle.sprite) return;
 
+        // Pick up external velocity changes (bounces, setVelocity, etc.)
+        // before applying this step's turn/accel.
+        syncKinematicsFromSprite(vehicle);
+
         const surface = surfaceUnder(vehicle.sprite);
 
         if (turn !== 0 && vehicle.speed > 0) {
@@ -321,6 +386,40 @@ namespace vehicles {
             if (surfaceRegistry[i].tile.equals(tile)) return surfaceRegistry[i].props;
         }
         return DEFAULT_SURFACE;
+    }
+
+    function pruneDestroyedVehicles(): void {
+        for (let i = vehicleRegistry.length - 1; i >= 0; i--) {
+            const sp = vehicleRegistry[i].sprite;
+            if (!sp || (sp.flags & sprites.Flag.Destroyed)) {
+                vehicleRegistry.splice(i, 1);
+            }
+        }
+    }
+
+    // Seed speed/angle from the sprite's current velocity (used when wrapping).
+    function seedKinematicsFromSprite(vehicle: Vehicle): void {
+        const vx = vehicle.sprite.vx;
+        const vy = vehicle.sprite.vy;
+        const mag = Math.sqrt(vx * vx + vy * vy);
+        vehicle.speed = clamp(mag, 0, vehicle.maxSpeed);
+        if (mag > VELOCITY_SYNC_EPS) {
+            vehicle.angle = Math.atan2(vy, vx);
+        }
+    }
+
+    // If sprite vx/vy no longer match what speed/angle would produce, treat
+    // the sprite as authoritative so wall bounces and sprite.setVelocity stay
+    // consistent with the next drive step.
+    function syncKinematicsFromSprite(vehicle: Vehicle): void {
+        const expectedVx = vehicle.speed * Math.cos(vehicle.angle);
+        const expectedVy = vehicle.speed * Math.sin(vehicle.angle);
+        const sp = vehicle.sprite;
+        if (Math.abs(sp.vx - expectedVx) <= VELOCITY_SYNC_EPS
+            && Math.abs(sp.vy - expectedVy) <= VELOCITY_SYNC_EPS) {
+            return;
+        }
+        seedKinematicsFromSprite(vehicle);
     }
 
     function applyVelocity(vehicle: Vehicle): void {

@@ -7,17 +7,21 @@ You do **not** need arcade-sprite-util, arcade-sprite-data, or sprite-fx for veh
 ## Quick start
 
 ```blocks
+let playerSprite: Sprite = null
 let playerCar: vehicles.Vehicle = null
 let opponentCar: vehicles.Vehicle = null
 let waypointList: waypoints.WaypointList = null
 
 tiles.setCurrentTilemap(tilemap`level0`)
 
-playerCar = vehicles.create(assets.image`car-red`, SpriteKind.Player)
-playerCar.sprite.setPosition(232, 648)
+// Wrap an existing sprite (same instance — setPosition / overlaps / camera still use it)
+playerSprite = sprites.create(assets.image`car-red`, SpriteKind.Player)
+playerCar = vehicles.createFromSprite(playerSprite)
+playerSprite.setPosition(232, 648)
 vehicles.setAngle(playerCar, -90)
 vehicles.setPowers(playerCar, 2, 5)
 
+// Or create sprite + vehicle in one step
 opponentCar = vehicles.create(assets.image`car-orange`, SpriteKind.Enemy)
 opponentCar.sprite.setPosition(200, 648)
 vehicles.setAngle(opponentCar, -90)
@@ -30,7 +34,7 @@ waypointList = waypoints.buildTrack(tilemap`level0`, [
 ])
 waypoints.follow(waypointList, opponentCar, 20)
 
-scene.cameraFollowSprite(vehicles.spriteOf(opponentCar))
+scene.cameraFollowSprite(playerSprite)
 
 game.onUpdateInterval(100, function () {
     // Player: wire your own left/right and accel/brake into turn/accel (-1/0/+1)
@@ -51,7 +55,7 @@ A `vehicles.Vehicle` wraps a sprite and owns:
 
 | Property | Meaning |
 | --- | --- |
-| `sprite` | x/y and collisions live here |
+| `sprite` | **same** Sprite instance — x/y, collisions, kinds live here |
 | `angle` | radians; orientation **and** velocity direction |
 | `speed` | magnitude (≥ 0) |
 | `accelPower` / `brakePower` | speed change per `drive` step (`brakePower` is positive) |
@@ -59,20 +63,23 @@ A `vehicles.Vehicle` wraps a sprite and owns:
 | `maxTurnRate` | peak turn rate at speed 0 (default 10°) |
 | `handling` | how fast turn falls off with speed (default 1 = linear) |
 
+Position is not duplicated on the vehicle. Speed/angle are vehicle-owned; each `drive` writes them to `vx`/`vy`. If something else changes the sprite's velocity first (wall bounce, `setVelocity`, …), the next `drive` re-reads `vx`/`vy` into speed/angle so they stay consistent.
+
 ### Driving
 
 `vehicles.drive(vehicle, turn, accel)` runs one physics step:
 
-1. Looks up the **surface** under the sprite (see below).
-2. Turns if `turn ≠ 0` and `speed > 0`:
+1. If sprite `vx`/`vy` diverged from the vehicle's speed/angle, re-sync from the sprite.
+2. Looks up the **surface** under the sprite (see below).
+3. Turns if `turn ≠ 0` and `speed > 0`:
    `turnRate = maxTurnRate × (1 − speed/maxSpeed)^handling × surface.grip`.
    So steering is strongest when slow and fades to none at max speed.
    Raise `maxTurnRate` for sharper low-speed steering; lower `handling`
    (e.g. `0.5`) to keep more turn at high speed, or raise it (e.g. `2`)
    for a vehicle that washes out sooner.
-3. Accelerates or brakes using `accelPower` / `brakePower` × surface traction.
-4. Subtracts surface friction (additive drain).
-5. Sets `vx`/`vy` from angle + speed and rotates the sprite image to match.
+4. Accelerates or brakes using `accelPower` / `brakePower` × surface traction.
+5. Subtracts surface friction (additive drain).
+6. Sets `vx`/`vy` from angle + speed and rotates the sprite image to match.
 
 `turn` and `accel` are typically `-1`, `0`, or `+1` — the same signals `waypoints.planTurn` / `planAccel` return.
 
@@ -128,7 +135,7 @@ Paints onto the **active** tilemap and restores whatever tile was really there (
 ## Notes and limitations
 
 * `brakePower` is stored as a **positive** value (speed lost when braking). Old sprite-data setups that used `-5` become `vehicles.setPowers(..., 2, 5)`.
-* Vehicle images are assumed to face **right** at angle 0° (same convention as typical Arcade “velocity at angle” helpers).
+* Vehicle images are assumed to face **right** at angle 0° (same convention as typical Arcade “velocity at angle” helpers). `createFromSprite` treats the sprite's current image as that unrotated art.
 * Within a waypoint colour band, tiles are chained by nearest neighbor — avoid looping a single colour band back near itself.
 * `planTurn` sign: positive angle difference (target clockwise of heading) → `+1` (right). Flip in your own code if needed.
 * If a vehicle isn’t registered with `follow`, `planTurn` / `planAccel` log a warning and return `0`.
@@ -138,6 +145,8 @@ Paints onto the **active** tilemap and restores whatever tile was really there (
 ### Vehicles
 
 - `vehicles.create(img, kind): Vehicle`
+- `vehicles.createFromSprite(sprite): Vehicle` (idempotent; same sprite → same vehicle)
+- `vehicles.vehicleOf(sprite): Vehicle` (lookup only)
 - `vehicles.spriteOf(vehicle): Sprite`
 - `vehicles.setAngle` / `angle` (degrees in blocks)
 - `vehicles.setSpeed` / `speed`
