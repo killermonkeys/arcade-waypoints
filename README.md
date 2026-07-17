@@ -32,7 +32,8 @@ waypointList = waypoints.buildTrack(tilemap`level0`, [
     assets.tile`waypoint01`,
     assets.tile`waypoint02`
 ])
-waypoints.follow(waypointList, opponentCar, 20)
+waypoints.follow(waypointList, 24)
+waypoints.drawGates(waypointList, true)
 
 scene.cameraFollowSprite(playerSprite)
 
@@ -41,8 +42,8 @@ game.onUpdateInterval(100, function () {
     vehicles.drive(playerCar, /* turn */, /* accel */)
     vehicles.drive(
         opponentCar,
-        waypoints.planTurn(waypointList, opponentCar, 0.2),
-        waypoints.planAccel(waypointList, opponentCar, 0.2)
+        waypoints.planTurn(waypointList, opponentCar, 12),
+        waypoints.planAccel(waypointList, opponentCar, 35)
     )
 })
 ```
@@ -56,7 +57,7 @@ A `vehicles.Vehicle` wraps a sprite and owns:
 | Property | Meaning |
 | --- | --- |
 | `sprite` | **same** Sprite instance — x/y, collisions, kinds live here |
-| `angle` | radians; orientation **and** velocity direction |
+| `angle` | degrees; orientation **and** velocity direction |
 | `speed` | magnitude (≥ 0) |
 | `accelPower` / `brakePower` | speed change per `drive` step (`brakePower` is positive) |
 | `maxSpeed` | clamp; also the speed at which turn rate reaches zero (default 200) |
@@ -108,9 +109,11 @@ You can author markers on a **separate tilemap** (same width/height/scale as the
 
 Then:
 
-- `waypoints.follow(list, vehicle, thresholdPx)` — auto-advance current waypoint.
+- `waypoints.follow(list, gateHalfWidthPx)` — turns every waypoint into a crossing gate and tracks all vehicles, including vehicles created later.
 - `waypoints.planTurn` / `planAccel` — return turn/accel for `vehicles.drive`, using **`vehicle.angle`** as heading.
-- Optional debug highlighting of prev/current/next tiles.
+- `waypoints.drawGates(list, true)` — draw the gate lines for debugging; each gate changes colour when crossed.
+
+Each gate is a line through a waypoint, perpendicular to the line from the previous waypoint to that waypoint. A vehicle advances only when it crosses its current gate in the forward direction, which avoids the old “missed the radius and circled back” problem.
 
 ### Keeping marker tiles off the real level
 
@@ -118,19 +121,29 @@ Then:
 2. Paint markers only on the duplicate.
 3. Call `buildTrack` with the duplicate; keep the real tilemap as current during play.
 
-### Debug highlighting
+### Finish line and laps
+
+Define a finish line from two tile locations and a direction:
 
 ```blocks
-waypoints.debugShowWaypoints(
-    waypointList,
-    opponentCar,
-    assets.tile`debugPrev`,
-    assets.tile`debugCur`,
-    assets.tile`debugNext`
+waypoints.setFinishLine(
+    tiles.getTileLocation(10, 42),
+    tiles.getTileLocation(13, 42),
+    true
 )
+
+waypoints.onFinishCrossed(function (vehicle, fullLap) {
+    if (fullLap) {
+        // Count a lap, record game.runtime(), decide whether the race is over.
+    } else {
+        // First crossing starts the first timed lap, or the car skipped gates.
+    }
+})
 ```
 
-Paints onto the **active** tilemap and restores whatever tile was really there (works with the separate-authoring-tilemap pattern).
+`upward = true` means the valid crossing direction is toward the top of the screen; `false` means toward the bottom. The first finish crossing for a vehicle always reports `fullLap = false`. Later crossings report `true` only if that vehicle crossed every active waypoint gate in order since its previous finish crossing.
+
+Lap counts, lap timing, and deciding the winner are intentionally left to the game. A typical pattern is to store per-vehicle `laps`, `lapStartMs`, and `bestLapMs`; on `fullLap`, increment `laps`, compute `game.runtime() - lapStartMs`, then reset `lapStartMs`.
 
 ## Notes and limitations
 
@@ -138,7 +151,8 @@ Paints onto the **active** tilemap and restores whatever tile was really there (
 * Vehicle images are assumed to face **right** at angle 0° (same convention as typical Arcade “velocity at angle” helpers). `createFromSprite` treats the sprite's current image as that unrotated art.
 * Within a waypoint colour band, tiles are chained by nearest neighbor — avoid looping a single colour band back near itself.
 * `planTurn` sign: positive angle difference (target clockwise of heading) → `+1` (right). Flip in your own code if needed.
-* If a vehicle isn’t registered with `follow`, `planTurn` / `planAccel` log a warning and return `0`.
+* All public angles and thresholds are in **degrees**. `planTurn` defaults to about `12°`; `planAccel` defaults to about `35°`.
+* `waypoints.follow` tracks all vehicles globally for that waypoint list. Call it once after building the track; vehicles created later are picked up automatically.
 
 ## API sketch
 
@@ -147,6 +161,7 @@ Paints onto the **active** tilemap and restores whatever tile was really there (
 - `vehicles.create(img, kind): Vehicle`
 - `vehicles.createFromSprite(sprite): Vehicle` (idempotent; same sprite → same vehicle)
 - `vehicles.vehicleOf(sprite): Vehicle` (lookup only)
+- `vehicles.all(): Vehicle[]`
 - `vehicles.spriteOf(vehicle): Sprite`
 - `vehicles.setAngle` / `angle` (degrees in blocks)
 - `vehicles.setSpeed` / `speed`
@@ -163,7 +178,8 @@ Paints onto the **active** tilemap and restores whatever tile was really there (
 - `waypoints.follow` / `currentWaypoint`
 - `waypoints.planTurn` / `planAccel`
 - `waypoints.onWaypointReached`
-- `waypoints.debugShowWaypoints` / `debugHideWaypoints`
+- `waypoints.drawGates`
+- `waypoints.setFinishLine` / `onFinishCrossed`
 
 ## Supported targets
 

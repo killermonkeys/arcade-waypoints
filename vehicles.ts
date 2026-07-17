@@ -55,14 +55,14 @@ namespace vehicles {
      */
     export class Vehicle {
         sprite: Sprite;
-        // Radians; orientation and velocity direction (source of truth).
+        // Degrees; orientation and velocity direction (source of truth).
         angle: number;
         speed: number;
         accelPower: number;
         // Positive speed loss per drive step when braking.
         brakePower: number;
         maxSpeed: number;
-        // Peak turn rate in radians/step at speed 0 (default ≈ 10°).
+        // Peak turn rate in degrees/step at speed 0 (default 10°).
         maxTurnRate: number;
         // How quickly turn rate falls off as speed approaches maxSpeed.
         // turnRate = maxTurnRate * (1 - speed/maxSpeed)^handling
@@ -79,7 +79,7 @@ namespace vehicles {
             this.accelPower = 2;
             this.brakePower = 5;
             this.maxSpeed = 200;
-            this.maxTurnRate = degreesToRadians(10);
+            this.maxTurnRate = 10;
             this.handling = 1;
         }
     }
@@ -150,6 +150,14 @@ namespace vehicles {
     }
 
     /**
+     * All live vehicles currently registered with this extension.
+     */
+    export function all(): Vehicle[] {
+        pruneDestroyedVehicles();
+        return vehicleRegistry.slice();
+    }
+
+    /**
      * The underlying sprite of a vehicle (for camera follow, overlaps, etc.).
      * Same object you passed to createFromSprite, or that create made.
      */
@@ -173,7 +181,7 @@ namespace vehicles {
     //% group="Vehicle" weight=90 blockGap=8
     export function setAngle(vehicle: Vehicle, degrees: number): void {
         if (!vehicle) return;
-        vehicle.angle = degreesToRadians(degrees);
+        vehicle.angle = degrees;
         applyFacing(vehicle);
         applyVelocity(vehicle);
     }
@@ -187,7 +195,7 @@ namespace vehicles {
     //% vehicle.defl=myVehicle
     //% group="Vehicle" weight=89 blockGap=8
     export function angle(vehicle: Vehicle): number {
-        return vehicle ? radiansToDegrees(vehicle.angle) : 0;
+        return vehicle ? vehicle.angle : 0;
     }
 
     /**
@@ -265,7 +273,7 @@ namespace vehicles {
     //% group="Vehicle" weight=84 blockGap=8
     export function setMaxTurnRate(vehicle: Vehicle, degrees: number): void {
         if (!vehicle) return;
-        vehicle.maxTurnRate = degreesToRadians(Math.max(0, degrees));
+        vehicle.maxTurnRate = Math.max(0, degrees);
     }
 
     /**
@@ -358,16 +366,16 @@ namespace vehicles {
         surfaceRegistry.push(new SurfaceEntry(tile, props));
     }
 
-    export function degreesToRadians(degrees: number): number {
+    function clamp(value: number, min: number, max: number): number {
+        return Math.min(max, Math.max(min, value));
+    }
+
+    function toRadians(degrees: number): number {
         return degrees * Math.PI / 180;
     }
 
-    export function radiansToDegrees(radians: number): number {
+    function toDegrees(radians: number): number {
         return radians * 180 / Math.PI;
-    }
-
-    function clamp(value: number, min: number, max: number): number {
-        return Math.min(max, Math.max(min, value));
     }
 
     // Peak turn at speed 0, zero at maxSpeed: maxTurnRate * (1 - speed/maxSpeed)^handling
@@ -404,7 +412,7 @@ namespace vehicles {
         const mag = Math.sqrt(vx * vx + vy * vy);
         vehicle.speed = clamp(mag, 0, vehicle.maxSpeed);
         if (mag > VELOCITY_SYNC_EPS) {
-            vehicle.angle = Math.atan2(vy, vx);
+            vehicle.angle = toDegrees(Math.atan2(vy, vx));
         }
     }
 
@@ -412,8 +420,9 @@ namespace vehicles {
     // the sprite as authoritative so wall bounces and sprite.setVelocity stay
     // consistent with the next drive step.
     function syncKinematicsFromSprite(vehicle: Vehicle): void {
-        const expectedVx = vehicle.speed * Math.cos(vehicle.angle);
-        const expectedVy = vehicle.speed * Math.sin(vehicle.angle);
+        const radians = toRadians(vehicle.angle);
+        const expectedVx = vehicle.speed * Math.cos(radians);
+        const expectedVy = vehicle.speed * Math.sin(radians);
         const sp = vehicle.sprite;
         if (Math.abs(sp.vx - expectedVx) <= VELOCITY_SYNC_EPS
             && Math.abs(sp.vy - expectedVy) <= VELOCITY_SYNC_EPS) {
@@ -423,13 +432,13 @@ namespace vehicles {
     }
 
     function applyVelocity(vehicle: Vehicle): void {
-        vehicle.sprite.vx = vehicle.speed * Math.cos(vehicle.angle);
-        vehicle.sprite.vy = vehicle.speed * Math.sin(vehicle.angle);
+        const radians = toRadians(vehicle.angle);
+        vehicle.sprite.vx = vehicle.speed * Math.cos(radians);
+        vehicle.sprite.vy = vehicle.speed * Math.sin(radians);
     }
 
     function applyFacing(vehicle: Vehicle): void {
-        const degrees = radiansToDegrees(vehicle.angle);
-        vehicle.sprite.setImage(rotateImage(vehicle.originalImage, degrees));
+        vehicle.sprite.setImage(rotateImage(vehicle.originalImage, vehicle.angle));
     }
 
     // Same approach as sprite-fx rotateImage: degrees in, rebuild from original.

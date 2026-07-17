@@ -4,9 +4,10 @@
  * Mark your track with coloured tiles: exactly one tile of a "start" colour,
  * then one or more tiles of each following checkpoint colour, in the order
  * the track should be driven. buildTrack finds those tiles and chains them
- * with nearest-neighbor ordering. Register a vehicles.Vehicle to follow the
- * list; planTurn / planAccel produce the same -1/0/+1 signals that
- * vehicles.drive expects, using the vehicle's angle as its heading.
+ * with nearest-neighbor ordering. Start following a list once; every live
+ * vehicle then advances through gates built from those waypoints. planTurn /
+ * planAccel produce the same -1/0/+1 signals that vehicles.drive expects,
+ * using the vehicle's angle as its heading.
  */
 //% color="#B36521" icon="\uf018" block="Waypoints"
 //% groups=['Track', 'Driving', 'Events', 'Debug']
@@ -19,65 +20,85 @@ namespace waypoints {
     export class WaypointList {
         locations: tiles.Location[];
         tilemap: tiles.TileMapData;
-        followers: Follower[];
+        progress: VehicleProgress[];
         changeHandlers: ((sprite: Sprite, index: number) => void)[];
-        debugConfigs: DebugConfig[];
+        gateHalfWidth: number;
+        gateColors: number[];
+        active: boolean;
+        drawGateLines: boolean;
         tickerStarted: boolean;
+        paintStarted: boolean;
 
         constructor(locations: tiles.Location[], tilemap: tiles.TileMapData) {
             this.locations = locations;
             this.tilemap = tilemap;
-            this.followers = [];
+            this.progress = [];
             this.changeHandlers = [];
-            this.debugConfigs = [];
+            this.gateHalfWidth = 16;
+            this.gateColors = [];
+            this.active = false;
+            this.drawGateLines = false;
             this.tickerStarted = false;
+            this.paintStarted = false;
         }
     }
 
-    class Follower {
+    class VehicleProgress {
         vehicle: vehicles.Vehicle;
         currentIndex: number;
-        thresholdDistance: number;
+        lastX: number;
+        lastY: number;
+        gatesHit: boolean[];
 
-        constructor(vehicle: vehicles.Vehicle, currentIndex: number, thresholdDistance: number) {
+        constructor(vehicle: vehicles.Vehicle, currentIndex: number, waypointCount: number) {
             this.vehicle = vehicle;
             this.currentIndex = currentIndex;
-            this.thresholdDistance = thresholdDistance;
+            this.lastX = vehicle.sprite.x;
+            this.lastY = vehicle.sprite.y;
+            this.gatesHit = newBooleanArray(waypointCount);
         }
     }
 
-    class DebugConfig {
+    class GateSegment {
+        x1: number;
+        y1: number;
+        x2: number;
+        y2: number;
+        px: number;
+        py: number;
+        nx: number;
+        ny: number;
+    }
+
+    class FinishLine {
+        x1: number;
+        y1: number;
+        x2: number;
+        y2: number;
+        nx: number;
+        ny: number;
+    }
+
+    class FinishProgress {
         vehicle: vehicles.Vehicle;
-        prevTile: Image;
-        curTile: Image;
-        nextTile: Image;
-        paintedIndices: number[];
-        // The tile that was actually on the active tilemap at each painted
-        // index, captured just before painting over it - not the marker
-        // tile - so reverting is correct even if buildTrack scanned a
-        // different (e.g. hidden authoring-only) tilemap than the one
-        // that's currently active in the scene.
-        originalImages: Image[];
+        lastX: number;
+        lastY: number;
+        crossCount: number;
 
-        constructor(vehicle: vehicles.Vehicle, prevTile: Image, curTile: Image, nextTile: Image) {
+        constructor(vehicle: vehicles.Vehicle) {
             this.vehicle = vehicle;
-            this.prevTile = prevTile;
-            this.curTile = curTile;
-            this.nextTile = nextTile;
-            this.paintedIndices = [];
-            this.originalImages = [];
+            this.lastX = vehicle.sprite.x;
+            this.lastY = vehicle.sprite.y;
+            this.crossCount = 0;
         }
     }
 
-    class DebugRole {
-        index: number;
-        image: Image;
-
-        constructor(index: number, image: Image) {
-            this.index = index;
-            this.image = image;
-        }
-    }
+    const DEBUG_COLORS = [2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14];
+    const activeLists: WaypointList[] = [];
+    const finishHandlers: ((vehicle: vehicles.Vehicle, fullLap: boolean) => void)[] = [];
+    const finishProgress: FinishProgress[] = [];
+    let finishLine: FinishLine = undefined;
+    let finishTickerStarted = false;
 
     /**
      * Scan a tilemap for the given sequence of marker tile colours and
@@ -158,7 +179,7 @@ namespace waypoints {
     }
 
     /**
-     * The angle in radians from a sprite to a tile location.
+     * The angle in degrees from a sprite to a tile location.
      * @param sprite the sprite
      * @param location the tile location
      */
@@ -169,36 +190,28 @@ namespace waypoints {
     //% group="Driving" weight=84 blockGap=8
     export function angleTo(sprite: Sprite, location: tiles.Location): number {
         if (!sprite || !location) return 0;
-        return Math.atan2(location.y - sprite.y, location.x - sprite.x);
+        return toDegrees(Math.atan2(location.y - sprite.y, location.x - sprite.x));
     }
 
     /**
-     * Register a vehicle to follow a waypoint list. The nearest waypoint to
-     * the vehicle right now becomes its current target; once the vehicle
-     * gets within the threshold distance of it, the target automatically
-     * advances to the next waypoint (looping back to the start once the end
-     * of the list is reached).
+     * Start gate following for every vehicle. Each waypoint becomes a gate:
+     * a line through that waypoint, perpendicular to the line from the
+     * previous waypoint to this one. Any existing or future vehicle advances
+     * when it crosses its current gate in the correct direction.
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param vehicle the vehicle that should follow the list
-     * @param thresholdDistance how close (in pixels) the vehicle must get before advancing to the next waypoint
+     * @param gateHalfWidth half the drawn/checkable gate width in pixels
      */
     //% blockId=waypoints_follow
-    //% block="make $vehicle follow $list with threshold $thresholdDistance px"
-    //% vehicle.shadow=variables_get
-    //% vehicle.defl=myVehicle
-    //% thresholdDistance.defl=8
+    //% block="follow gates on $list with half width $gateHalfWidth px"
+    //% gateHalfWidth.defl=24
     //% group="Driving" weight=80 blockGap=8
-    export function follow(list: WaypointList, vehicle: vehicles.Vehicle, thresholdDistance: number): void {
-        if (!list || !vehicle || !vehicle.sprite || !list.locations || list.locations.length === 0) return;
-
-        const existing = findFollower(list, vehicle);
-        if (existing) {
-            existing.thresholdDistance = thresholdDistance;
-        } else {
-            const nearestIndex = nearestWaypointIndex(list, vehicle.sprite);
-            list.followers.push(new Follower(vehicle, nearestIndex, thresholdDistance));
-        }
-
+    export function follow(list: WaypointList, gateHalfWidth: number): void {
+        if (!list || !list.locations || list.locations.length === 0) return;
+        list.gateHalfWidth = Math.max(1, gateHalfWidth);
+        list.active = true;
+        initGateColors(list);
+        if (activeLists.indexOf(list) < 0) activeLists.push(list);
+        ensureAllVehicleProgress(list);
         ensureTicker(list);
     }
 
@@ -215,9 +228,9 @@ namespace waypoints {
     //% group="Driving" weight=75 blockGap=8
     export function currentWaypoint(list: WaypointList, vehicle: vehicles.Vehicle): tiles.Location {
         if (!list || !vehicle) return undefined;
-        const follower = findFollower(list, vehicle);
-        if (!follower) return undefined;
-        return list.locations[follower.currentIndex];
+        const progress = ensureProgress(list, vehicle);
+        if (!progress) return undefined;
+        return list.locations[progress.currentIndex];
     }
 
     /**
@@ -227,23 +240,23 @@ namespace waypoints {
      * -1 to turn left, or +1 to turn right. Feed the result into
      * vehicles.drive.
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param vehicle the vehicle, which must already be following the list (see waypoints.follow)
-     * @param thresholdRadians how far off (in radians) the vehicle's angle can be before it needs to turn
+     * @param vehicle the vehicle
+     * @param thresholdDegrees how far off (in degrees) the vehicle's angle can be before it needs to turn
      */
     //% blockId=waypoints_plan_turn
-    //% block="plan turn for $vehicle following $list with threshold $thresholdRadians"
+    //% block="plan turn for $vehicle following $list with threshold $thresholdDegrees degrees"
     //% vehicle.shadow=variables_get
     //% vehicle.defl=myVehicle
-    //% thresholdRadians.defl=0.2
+    //% thresholdDegrees.defl=12
     //% group="Driving" weight=70 blockGap=8
-    export function planTurn(list: WaypointList, vehicle: vehicles.Vehicle, thresholdRadians: number): number {
-        if (!list || !vehicle || !findFollower(list, vehicle)) {
+    export function planTurn(list: WaypointList, vehicle: vehicles.Vehicle, thresholdDegrees: number): number {
+        if (!list || !vehicle || !ensureProgress(list, vehicle)) {
             console.log("waypoints: vehicle is not following this waypoint list");
             return 0;
         }
 
         const diff = headingDifference(list, vehicle);
-        if (Math.abs(diff) <= thresholdRadians) return 0;
+        if (Math.abs(diff) <= thresholdDegrees) return 0;
         return diff > 0 ? 1 : -1;
     }
 
@@ -253,23 +266,23 @@ namespace waypoints {
      * from its current waypoint by more than the threshold, in which case
      * it returns -1 to brake. Feed the result into vehicles.drive.
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param vehicle the vehicle, which must already be following the list (see waypoints.follow)
-     * @param thresholdRadians how far off (in radians) the vehicle's angle can be before it should brake instead of accelerating
+     * @param vehicle the vehicle
+     * @param thresholdDegrees how far off (in degrees) the vehicle's angle can be before it should brake instead of accelerating
      */
     //% blockId=waypoints_plan_accel
-    //% block="plan accel for $vehicle following $list with threshold $thresholdRadians"
+    //% block="plan accel for $vehicle following $list with threshold $thresholdDegrees degrees"
     //% vehicle.shadow=variables_get
     //% vehicle.defl=myVehicle
-    //% thresholdRadians.defl=0.6
+    //% thresholdDegrees.defl=35
     //% group="Driving" weight=65 blockGap=8
-    export function planAccel(list: WaypointList, vehicle: vehicles.Vehicle, thresholdRadians: number): number {
-        if (!list || !vehicle || !findFollower(list, vehicle)) {
+    export function planAccel(list: WaypointList, vehicle: vehicles.Vehicle, thresholdDegrees: number): number {
+        if (!list || !vehicle || !ensureProgress(list, vehicle)) {
             console.log("waypoints: vehicle is not following this waypoint list");
             return 0;
         }
 
         const diff = headingDifference(list, vehicle);
-        return Math.abs(diff) > thresholdRadians ? -1 : 1;
+        return Math.abs(diff) > thresholdDegrees ? -1 : 1;
     }
 
     /**
@@ -288,68 +301,78 @@ namespace waypoints {
     }
 
     /**
-     * For debugging: highlight the previous, current, and next waypoint for
-     * a vehicle by changing their tiles on the currently active tilemap. The
-     * highlighted tiles move along automatically as the vehicle advances,
-     * and any tile that's no longer prev/current/next is restored to
-     * whatever tile was actually there before it got highlighted (not the
-     * waypoints.buildTrack marker tile - this works correctly even if you
-     * built the waypoint list from a separate, hidden tilemap). Leave any
-     * of the three images empty to skip that role.
+     * Draw each waypoint gate as a debug line. Gate colours cycle when any
+     * vehicle crosses them.
      * @param list the waypoint list, from waypoints.buildTrack
-     * @param vehicle the vehicle to show debug waypoints for, which must already be following the list (see waypoints.follow)
-     * @param prevTile tile image for the previous waypoint
-     * @param curTile tile image for the current waypoint
-     * @param nextTile tile image for the next waypoint
+     * @param enabled whether gate lines should be drawn
      */
-    //% blockId=waypoints_debug_show
-    //% block="show prev $prevTile current $curTile next $nextTile waypoints on $list for $vehicle"
-    //% vehicle.shadow=variables_get
-    //% vehicle.defl=myVehicle
-    //% prevTile.shadow=tileset_tile_picker
-    //% curTile.shadow=tileset_tile_picker
-    //% nextTile.shadow=tileset_tile_picker
+    //% blockId=waypoints_draw_gates
+    //% block="draw gates for $list $enabled"
+    //% enabled.defl=true
     //% group="Debug" weight=50 blockGap=8
-    export function debugShowWaypoints(list: WaypointList, vehicle: vehicles.Vehicle, prevTile: Image, curTile: Image, nextTile: Image): void {
-        if (!list || !vehicle) return;
-
-        let config = findDebugConfig(list, vehicle);
-        if (!config) {
-            config = new DebugConfig(vehicle, prevTile, curTile, nextTile);
-            list.debugConfigs.push(config);
-        } else {
-            config.prevTile = prevTile;
-            config.curTile = curTile;
-            config.nextTile = nextTile;
-        }
-
-        paintDebug(list, config);
+    export function drawGates(list: WaypointList, enabled: boolean): void {
+        if (!list) return;
+        list.drawGateLines = enabled;
+        initGateColors(list);
+        ensurePainter(list);
     }
 
     /**
-     * Stop debug-highlighting waypoints for a vehicle, and restore any
-     * highlighted tiles back to whatever was there before.
-     * @param list the waypoint list, from waypoints.buildTrack
-     * @param vehicle the vehicle to stop showing debug waypoints for
+     * Define the finish line as the segment between two tile locations.
+     * If upward is true, the valid crossing direction is toward the top of
+     * the screen; otherwise it is toward the bottom. For near-vertical lines
+     * where both normals are horizontal, the tie-break is left for upward
+     * and right for downward.
+     * @param tileA one end of the finish line
+     * @param tileB the other end of the finish line
+     * @param upward true for crossings toward screen-up, false for screen-down
      */
-    //% blockId=waypoints_debug_hide
-    //% block="hide debug waypoints on $list for $vehicle"
-    //% vehicle.shadow=variables_get
-    //% vehicle.defl=myVehicle
-    //% group="Debug" weight=45 blockGap=8
-    export function debugHideWaypoints(list: WaypointList, vehicle: vehicles.Vehicle): void {
-        if (!list || !vehicle) return;
+    //% blockId=waypoints_set_finish_line
+    //% block="finish line from $tileA to $tileB upward $upward"
+    //% tileA.shadow=mapgettile
+    //% tileB.shadow=mapgettile
+    //% upward.defl=true
+    //% group="Events" weight=58 blockGap=8
+    export function setFinishLine(tileA: tiles.Location, tileB: tiles.Location, upward: boolean): void {
+        if (!tileA || !tileB) return;
+        const dx = tileB.x - tileA.x;
+        const dy = tileB.y - tileA.y;
+        const mag = Math.sqrt(dx * dx + dy * dy);
+        if (mag <= 0) return;
 
-        const config = findDebugConfig(list, vehicle);
-        if (!config) return;
+        const nx1 = -dy / mag;
+        const ny1 = dx / mag;
+        const nx2 = -nx1;
+        const ny2 = -ny1;
+        const pickFirst = Math.abs(ny1 - ny2) > 0.001
+            ? (upward ? ny1 < ny2 : ny1 > ny2)
+            : (upward ? nx1 < nx2 : nx1 > nx2);
 
-        for (let i = 0; i < config.paintedIndices.length; i++) {
-            tiles.setTileAt(list.locations[config.paintedIndices[i]], config.originalImages[i]);
-        }
+        finishLine = new FinishLine();
+        finishLine.x1 = tileA.x;
+        finishLine.y1 = tileA.y;
+        finishLine.x2 = tileB.x;
+        finishLine.y2 = tileB.y;
+        finishLine.nx = pickFirst ? nx1 : nx2;
+        finishLine.ny = pickFirst ? ny1 : ny2;
+        ensureFinishTicker();
+    }
 
-        list.debugConfigs = list.debugConfigs.filter(function (c) {
-            return c.vehicle.sprite.id !== vehicle.sprite.id;
-        });
+    /**
+     * Run code whenever a vehicle crosses the finish line in the configured
+     * direction. The first crossing for a vehicle returns fullLap = false;
+     * later crossings return true only if that vehicle crossed every active
+     * waypoint gate in order since the previous finish crossing.
+     * @param handler code to run with the vehicle and whether the lap was complete
+     */
+    //% blockId=waypoints_on_finish_crossed
+    //% block="on finish crossed"
+    //% draggableParameters="reporter"
+    //% group="Events" weight=55 blockGap=8
+    export function onFinishCrossed(handler: (vehicle: vehicles.Vehicle, fullLap: boolean) => void): void {
+        if (!handler) return;
+        finishHandlers.push(handler);
+        ensureFinishTicker();
     }
 
     function orderWaypoints(tilemap: tiles.TileMapData, tileColours: Image[]): tiles.Location[] {
@@ -425,20 +448,6 @@ namespace waypoints {
         return dCol * dCol + dRow * dRow;
     }
 
-    function findFollower(list: WaypointList, vehicle: vehicles.Vehicle): Follower {
-        for (let i = 0; i < list.followers.length; i++) {
-            if (list.followers[i].vehicle.sprite.id === vehicle.sprite.id) return list.followers[i];
-        }
-        return undefined;
-    }
-
-    function findDebugConfig(list: WaypointList, vehicle: vehicles.Vehicle): DebugConfig {
-        for (let i = 0; i < list.debugConfigs.length; i++) {
-            if (list.debugConfigs[i].vehicle.sprite.id === vehicle.sprite.id) return list.debugConfigs[i];
-        }
-        return undefined;
-    }
-
     function nearestWaypointIndex(list: WaypointList, sprite: Sprite): number {
         let nearestIndex = 0;
         let nearestDistance = distanceTo(sprite, list.locations[0]);
@@ -454,6 +463,31 @@ namespace waypoints {
         return nearestIndex;
     }
 
+    function findProgress(list: WaypointList, vehicle: vehicles.Vehicle): VehicleProgress {
+        if (!list || !vehicle || !vehicle.sprite) return undefined;
+        for (let i = 0; i < list.progress.length; i++) {
+            if (list.progress[i].vehicle.sprite.id === vehicle.sprite.id) return list.progress[i];
+        }
+        return undefined;
+    }
+
+    function ensureProgress(list: WaypointList, vehicle: vehicles.Vehicle): VehicleProgress {
+        if (!list || !list.active || !vehicle || !vehicle.sprite || list.locations.length === 0) return undefined;
+        let progress = findProgress(list, vehicle);
+        if (!progress) {
+            progress = new VehicleProgress(vehicle, nearestWaypointIndex(list, vehicle.sprite), list.locations.length);
+            list.progress.push(progress);
+        }
+        return progress;
+    }
+
+    function ensureAllVehicleProgress(list: WaypointList): void {
+        const allVehicles = vehicles.all();
+        for (let i = 0; i < allVehicles.length; i++) {
+            ensureProgress(list, allVehicles[i]);
+        }
+    }
+
     function ensureTicker(list: WaypointList): void {
         if (list.tickerStarted) return;
         list.tickerStarted = true;
@@ -464,27 +498,32 @@ namespace waypoints {
     }
 
     function tick(list: WaypointList): void {
-        let cleanupNeeded = false;
+        if (!list.active) return;
+        ensureAllVehicleProgress(list);
 
-        for (let i = 0; i < list.followers.length; i++) {
-            const follower = list.followers[i];
-            const sprite = follower.vehicle.sprite;
+        let cleanupNeeded = false;
+        for (let i = 0; i < list.progress.length; i++) {
+            const progress = list.progress[i];
+            const sprite = progress.vehicle.sprite;
             if (!sprite || (sprite.flags & sprites.Flag.Destroyed)) {
                 cleanupNeeded = true;
                 continue;
             }
 
-            const target = list.locations[follower.currentIndex];
-            if (distanceTo(sprite, target) <= follower.thresholdDistance) {
-                follower.currentIndex = (follower.currentIndex + 1) % list.locations.length;
-                fireWaypointReached(list, sprite, follower.currentIndex);
-                updateDebugForVehicle(list, follower.vehicle);
+            const gate = gateForIndex(list, progress.currentIndex);
+            if (crossedForwardSegment(progress.lastX, progress.lastY, sprite.x, sprite.y, gate)) {
+                progress.gatesHit[progress.currentIndex] = true;
+                bumpGateColor(list, progress.currentIndex);
+                progress.currentIndex = (progress.currentIndex + 1) % list.locations.length;
+                fireWaypointReached(list, sprite, progress.currentIndex);
             }
+            progress.lastX = sprite.x;
+            progress.lastY = sprite.y;
         }
 
         if (cleanupNeeded) {
-            list.followers = list.followers.filter(function (f) {
-                return f.vehicle.sprite && !(f.vehicle.sprite.flags & sprites.Flag.Destroyed);
+            list.progress = list.progress.filter(function (p) {
+                return p.vehicle.sprite && !(p.vehicle.sprite.flags & sprites.Flag.Destroyed);
             });
         }
     }
@@ -495,83 +534,200 @@ namespace waypoints {
         }
     }
 
-    function updateDebugForVehicle(list: WaypointList, vehicle: vehicles.Vehicle): void {
-        const config = findDebugConfig(list, vehicle);
-        if (config) paintDebug(list, config);
+    function ensurePainter(list: WaypointList): void {
+        if (list.paintStarted) return;
+        list.paintStarted = true;
+        game.onPaint(function () {
+            if (!list.drawGateLines || !list.locations || list.locations.length === 0) return;
+            const left = scene.cameraProperty(CameraProperty.Left);
+            const top = scene.cameraProperty(CameraProperty.Top);
+            for (let i = 0; i < list.locations.length; i++) {
+                const gate = gateForIndex(list, i);
+                screen.drawLine(
+                    Math.round(gate.x1 - left),
+                    Math.round(gate.y1 - top),
+                    Math.round(gate.x2 - left),
+                    Math.round(gate.y2 - top),
+                    gateColor(list, i)
+                );
+            }
+        });
     }
 
-    function paintDebug(list: WaypointList, config: DebugConfig): void {
-        const follower = findFollower(list, config.vehicle);
-        if (!follower || list.locations.length === 0) return;
+    function initGateColors(list: WaypointList): void {
+        while (list.gateColors.length < list.locations.length) {
+            list.gateColors.push(DEBUG_COLORS[list.gateColors.length % DEBUG_COLORS.length]);
+        }
+    }
 
+    function gateColor(list: WaypointList, index: number): number {
+        initGateColors(list);
+        return list.gateColors[index];
+    }
+
+    function bumpGateColor(list: WaypointList, index: number): void {
+        initGateColors(list);
+        const current = list.gateColors[index];
+        let slot = DEBUG_COLORS.indexOf(current);
+        if (slot < 0) slot = index % DEBUG_COLORS.length;
+        list.gateColors[index] = DEBUG_COLORS[(slot + 1) % DEBUG_COLORS.length];
+    }
+
+    function gateForIndex(list: WaypointList, index: number): GateSegment {
         const count = list.locations.length;
-        const curIndex = follower.currentIndex;
-        const prevIndex = (curIndex - 1 + count) % count;
-        const nextIndex = (curIndex + 1) % count;
+        const current = list.locations[index];
+        const previous = list.locations[(index - 1 + count) % count];
+        let tx = current.x - previous.x;
+        let ty = current.y - previous.y;
+        let mag = Math.sqrt(tx * tx + ty * ty);
+        if (mag <= 0 && count > 1) {
+            const next = list.locations[(index + 1) % count];
+            tx = next.x - current.x;
+            ty = next.y - current.y;
+            mag = Math.sqrt(tx * tx + ty * ty);
+        }
+        if (mag <= 0) mag = 1;
 
-        // Pushed in prev, next, cur order so that when indices collide
-        // (e.g. on very short tracks), the later role wins: cur > next > prev.
-        const roles = [
-            new DebugRole(prevIndex, config.prevTile),
-            new DebugRole(nextIndex, config.nextTile),
-            new DebugRole(curIndex, config.curTile),
-        ];
+        const nx = tx / mag;
+        const ny = ty / mag;
+        const gx = -ny;
+        const gy = nx;
+        const half = list.gateHalfWidth;
+        const gate = new GateSegment();
+        gate.px = current.x;
+        gate.py = current.y;
+        gate.nx = nx;
+        gate.ny = ny;
+        gate.x1 = current.x - gx * half;
+        gate.y1 = current.y - gy * half;
+        gate.x2 = current.x + gx * half;
+        gate.y2 = current.y + gy * half;
+        return gate;
+    }
 
-        const newPainted: number[] = [];
-        const newImages: Image[] = [];
+    function crossedForwardSegment(x1: number, y1: number, x2: number, y2: number, gate: GateSegment): boolean {
+        if (!gate) return false;
+        const side1 = (x1 - gate.px) * gate.nx + (y1 - gate.py) * gate.ny;
+        const side2 = (x2 - gate.px) * gate.nx + (y2 - gate.py) * gate.ny;
+        if (!(side1 < -0.001 && side2 >= -0.001)) return false;
+        return segmentsIntersect(x1, y1, x2, y2, gate.x1, gate.y1, gate.x2, gate.y2);
+    }
 
-        for (let i = 0; i < roles.length; i++) {
-            const role = roles[i];
-            if (!role.image) continue;
+    function segmentsIntersect(ax: number, ay: number, bx: number, by: number, cx: number, cy: number, dx: number, dy: number): boolean {
+        const rx = bx - ax;
+        const ry = by - ay;
+        const sx = dx - cx;
+        const sy = dy - cy;
+        const denom = rx * sy - ry * sx;
+        if (Math.abs(denom) < 0.0001) return false;
 
-            const existingSlot = newPainted.indexOf(role.index);
-            if (existingSlot >= 0) {
-                newImages[existingSlot] = role.image;
-            } else {
-                newPainted.push(role.index);
-                newImages.push(role.image);
+        const qpx = cx - ax;
+        const qpy = cy - ay;
+        const t = (qpx * sy - qpy * sx) / denom;
+        const u = (qpx * ry - qpy * rx) / denom;
+        return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+    }
+
+    function newBooleanArray(length: number): boolean[] {
+        const result: boolean[] = [];
+        for (let i = 0; i < length; i++) result.push(false);
+        return result;
+    }
+
+    function resetProgressForVehicle(vehicle: vehicles.Vehicle): void {
+        for (let i = 0; i < activeLists.length; i++) {
+            const progress = findProgress(activeLists[i], vehicle);
+            if (progress) progress.gatesHit = newBooleanArray(activeLists[i].locations.length);
+        }
+    }
+
+    function hasCompleteGateProgress(vehicle: vehicles.Vehicle): boolean {
+        let sawActiveList = false;
+        for (let i = 0; i < activeLists.length; i++) {
+            const list = activeLists[i];
+            if (!list.active || list.locations.length === 0) continue;
+            sawActiveList = true;
+            const progress = findProgress(list, vehicle);
+            if (!progress || progress.gatesHit.length !== list.locations.length) return false;
+            for (let j = 0; j < progress.gatesHit.length; j++) {
+                if (!progress.gatesHit[j]) return false;
             }
         }
+        return sawActiveList;
+    }
 
-        // Revert indices that are no longer prev/cur/next back to whatever
-        // tile was really there before we painted over it.
-        for (let i = 0; i < config.paintedIndices.length; i++) {
-            const idx = config.paintedIndices[i];
-            if (newPainted.indexOf(idx) < 0) {
-                tiles.setTileAt(list.locations[idx], config.originalImages[i]);
+    function findFinishProgress(vehicle: vehicles.Vehicle): FinishProgress {
+        if (!vehicle || !vehicle.sprite) return undefined;
+        for (let i = 0; i < finishProgress.length; i++) {
+            if (finishProgress[i].vehicle.sprite.id === vehicle.sprite.id) return finishProgress[i];
+        }
+        const progress = new FinishProgress(vehicle);
+        finishProgress.push(progress);
+        return progress;
+    }
+
+    function ensureFinishTicker(): void {
+        if (finishTickerStarted) return;
+        finishTickerStarted = true;
+        game.onUpdate(function () {
+            tickFinishLine();
+        });
+    }
+
+    function tickFinishLine(): void {
+        const allVehicles = vehicles.all();
+        for (let i = 0; i < allVehicles.length; i++) {
+            const vehicle = allVehicles[i];
+            const sprite = vehicle.sprite;
+            const progress = findFinishProgress(vehicle);
+            if (!sprite || !progress) continue;
+
+            if (finishLine) {
+                const gate = new GateSegment();
+                gate.x1 = finishLine.x1;
+                gate.y1 = finishLine.y1;
+                gate.x2 = finishLine.x2;
+                gate.y2 = finishLine.y2;
+                gate.px = finishLine.x1;
+                gate.py = finishLine.y1;
+                gate.nx = finishLine.nx;
+                gate.ny = finishLine.ny;
+
+                if (crossedForwardSegment(progress.lastX, progress.lastY, sprite.x, sprite.y, gate)) {
+                    const fullLap = progress.crossCount > 0 && hasCompleteGateProgress(vehicle);
+                    progress.crossCount++;
+                    resetProgressForVehicle(vehicle);
+                    fireFinishCrossed(vehicle, fullLap);
+                }
             }
-        }
 
-        // Paint the new set, capturing each index's current tile the first
-        // time it's painted (or carrying forward the already-captured one
-        // if it was already highlighted, since its live tile is now ours).
-        const newOriginalImages: Image[] = [];
-        for (let i = 0; i < newPainted.length; i++) {
-            const idx = newPainted[i];
-            const previousSlot = config.paintedIndices.indexOf(idx);
-            const original = previousSlot >= 0
-                ? config.originalImages[previousSlot]
-                : tiles.tileImageAtLocation(list.locations[idx]);
-            newOriginalImages.push(original);
-            tiles.setTileAt(list.locations[idx], newImages[i]);
+            progress.lastX = sprite.x;
+            progress.lastY = sprite.y;
         }
+    }
 
-        config.paintedIndices = newPainted;
-        config.originalImages = newOriginalImages;
+    function fireFinishCrossed(vehicle: vehicles.Vehicle, fullLap: boolean): void {
+        for (let i = 0; i < finishHandlers.length; i++) {
+            finishHandlers[i](vehicle, fullLap);
+        }
+    }
+
+    function toDegrees(radians: number): number {
+        return radians * 180 / Math.PI;
     }
 
     function normalizeAngle(angle: number): number {
-        let a = angle % (2 * Math.PI);
-        if (a > Math.PI) a -= 2 * Math.PI;
-        if (a <= -Math.PI) a += 2 * Math.PI;
+        let a = angle % 360;
+        if (a > 180) a -= 360;
+        if (a <= -180) a += 360;
         return a;
     }
 
     function headingDifference(list: WaypointList, vehicle: vehicles.Vehicle): number {
-        const follower = findFollower(list, vehicle);
-        if (!follower) return 0;
+        const progress = ensureProgress(list, vehicle);
+        if (!progress) return 0;
 
-        const target = list.locations[follower.currentIndex];
+        const target = list.locations[progress.currentIndex];
         const toTarget = angleTo(vehicle.sprite, target);
         return normalizeAngle(toTarget - vehicle.angle);
     }
